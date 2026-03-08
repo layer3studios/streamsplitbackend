@@ -7,7 +7,7 @@ const GroupInvite = require('../models/GroupInvite');
 const GroupTransaction = require('../models/GroupTransaction');
 const EarningsAccount = require('../models/EarningsAccount');
 const JoinIntent = require('../models/JoinIntent');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 
 let razorpay = null;
@@ -30,6 +30,9 @@ async function resolveInviteByCode(code) {
         .populate('brand_id', 'name slug logo_url')
         .populate('created_by', 'name');
     if (!group) return { error: 'GROUP_NOT_FOUND', status: 404 };
+    if (group.status === 'archived' || group.status === 'expired') {
+        return { error: 'GROUP_CLOSED', status: 410 };
+    }
 
     return { invite, group };
 }

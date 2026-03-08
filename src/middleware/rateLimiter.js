@@ -1,5 +1,5 @@
 const rateLimit = require('express-rate-limit');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 
 const otpLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,

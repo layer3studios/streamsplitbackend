@@ -1,19 +1,12 @@
 const router = require('express').Router();
-const Razorpay = require('razorpay');
 const Group = require('../models/Group');
 const GroupMembership = require('../models/GroupMembership');
-const GroupTransaction = require('../models/GroupTransaction');
+const GroupInvite = require('../models/GroupInvite');
 const EarningsAccount = require('../models/EarningsAccount');
 const Brand = require('../models/Brand');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 const ChatMessage = require('../models/ChatMessage');
 const { authenticate, optionalAuth } = require('../middleware/auth');
-
-// Razorpay instance (may be null if keys not configured)
-let razorpay = null;
-if (process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_KEY_ID.includes('xxxxx')) {
-  razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
-}
 
 // ─── GET /groups/public ──────────────────────────────────────
 router.get('/public', optionalAuth, async (req, res, next) => {
@@ -84,6 +77,15 @@ router.post('/', authenticate, async (req, res, next) => {
       { upsert: true }
     );
 
+    // Create default GroupInvite so invite-based join always works
+    await GroupInvite.create({
+      group_id: group._id,
+      created_by: req.user._id,
+      created_by_role: 'owner',
+      status: 'active',
+      expires_at: null, // no expiry for default invite
+    });
+
     res.status(201).json({ success: true, data: group });
   } catch (err) { next(err); }
 });
@@ -91,7 +93,7 @@ router.post('/', authenticate, async (req, res, next) => {
 // ─── GET /groups/invite/:code — Resolve invite code ──────────
 router.get('/invite/:code', async (req, res, next) => {
   try {
-    const group = await Group.findOne({ invite_code: req.params.code })
+    const group = await Group.findOne({ invite_code: { $regex: new RegExp(`^${req.params.code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } })
       .populate('brand_id', 'name logo_url slug')
       .populate('created_by', 'name');
     if (!group) return res.status(404).json({ success: false, message: 'Invalid invite code' });
@@ -108,144 +110,12 @@ router.get('/invite/:code', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── POST /groups/:id/join/initiate — Create Razorpay Order ──
-router.post('/:id/join/initiate', authenticate, async (req, res, next) => {
-  try {
-    const group = await Group.findById(req.params.id);
-    if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
-    if (group.status === 'archived') return res.status(400).json({ success: false, message: 'Group is archived' });
-    if (group.member_count >= group.share_limit) return res.status(400).json({ success: false, message: 'Group is full' });
-
-    // Check if already a member
-    const existing = await GroupMembership.findOne({ group_id: group._id, user_id: req.user._id });
-    if (existing) return res.status(400).json({ success: false, message: 'Already a member of this group' });
-
-    // Check if there's already a pending transaction for this user+group
-    const pendingTx = await GroupTransaction.findOne({
-      group_id: group._id, buyer_id: req.user._id, status: 'pending',
-    });
-    if (pendingTx && pendingTx.razorpay_order_id) {
-      // Return existing pending order
-      return res.json({
-        success: true,
-        data: {
-          group_id: group._id,
-          group_name: group.name,
-          amount: pendingTx.gross,
-          razorpay: razorpay ? {
-            order_id: pendingTx.razorpay_order_id,
-            amount: Math.round(pendingTx.gross * 100),
-            currency: BRAND.currency.code,
-            key_id: process.env.RAZORPAY_KEY_ID,
-          } : null,
-          dev_mode: !razorpay,
-          transaction_id: pendingTx._id,
-        },
-      });
-    }
-
-    const feePercent = BRAND.money.platformCutPercent;
-    const gross = group.share_price;
-    const feeAmount = Math.round(gross * feePercent / 100);
-    const net = gross - feeAmount;
-    const holdHours = BRAND.money.withdrawalHoldHours || 0;
-    const pendingReleaseAt = holdHours > 0 ? new Date(Date.now() + holdHours * 3600000) : null;
-
-    // Find group owner
-    const ownerMembership = await GroupMembership.findOne({ group_id: group._id, role: 'owner' });
-    if (!ownerMembership) return res.status(500).json({ success: false, message: 'Group has no owner' });
-
-    if (razorpay) {
-      // Real Razorpay
-      const rpOrder = await razorpay.orders.create({
-        amount: Math.round(gross * 100),
-        currency: BRAND.currency.code,
-        receipt: `grp_${group._id}_${req.user._id}`,
-        notes: { group_id: group._id.toString(), buyer_id: req.user._id.toString() },
-      });
-
-      const tx = await GroupTransaction.create({
-        group_id: group._id,
-        owner_id: ownerMembership.user_id,
-        buyer_id: req.user._id,
-        gross, fee_percent: feePercent, fee_amount: feeAmount, net,
-        razorpay_order_id: rpOrder.id,
-        pending_release_at: pendingReleaseAt,
-        status: 'pending',
-      });
-
-      res.json({
-        success: true,
-        data: {
-          group_id: group._id,
-          group_name: group.name,
-          amount: gross,
-          razorpay: {
-            order_id: rpOrder.id,
-            amount: rpOrder.amount,
-            currency: rpOrder.currency,
-            key_id: process.env.RAZORPAY_KEY_ID,
-          },
-          transaction_id: tx._id,
-        },
-      });
-    } else {
-      // DEV mode — simulate payment
-      const devPaymentId = `dev_pay_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const devOrderId = `dev_ord_${Date.now()}`;
-
-      const tx = await GroupTransaction.create({
-        group_id: group._id,
-        owner_id: ownerMembership.user_id,
-        buyer_id: req.user._id,
-        gross, fee_percent: feePercent, fee_amount: feeAmount, net,
-        razorpay_order_id: devOrderId,
-        razorpay_payment_id: devPaymentId,
-        pending_release_at: pendingReleaseAt,
-        status: 'paid',
-      });
-
-      // DEV: immediately add membership + credit owner
-      await GroupMembership.create({ group_id: group._id, user_id: req.user._id, role: 'member' });
-
-      const updated = await Group.findByIdAndUpdate(
-        group._id,
-        { $inc: { member_count: 1 } },
-        { new: true }
-      );
-
-      // If group is now full, activate
-      if (updated.member_count >= updated.share_limit) {
-        updated.status = 'active';
-        updated.start_date = new Date();
-        updated.end_date = new Date(Date.now() + (updated.duration_days || 30) * 86400000);
-        await updated.save();
-      }
-
-      // Credit owner earnings — pending or withdrawable based on hold config
-      const earningsInc = holdHours > 0
-        ? { pending_balance: net, total_earned: net }
-        : { withdrawable_balance: net, total_earned: net };
-      await EarningsAccount.findOneAndUpdate(
-        { user_id: ownerMembership.user_id },
-        { $inc: earningsInc },
-        { upsert: true }
-      );
-
-      res.json({
-        success: true,
-        data: {
-          group_id: group._id,
-          group_name: group.name,
-          amount: gross,
-          dev_mode: true,
-          payment_complete: true,
-          transaction_id: tx._id,
-          message: 'DEV mode: payment auto-completed, membership created',
-        },
-      });
-    }
-  } catch (err) { next(err); }
+// ─── POST /groups/:id/join/initiate — DEPRECATED: use invite-based flow ──
+router.post('/:id/join/initiate', authenticate, async (req, res) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Direct join is deprecated. Please use invite code to join groups.',
+  });
 });
 
 // ─── POST /groups/:id/leave ──────────────────────────────────

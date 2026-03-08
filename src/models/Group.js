@@ -13,7 +13,7 @@ const schema = new mongoose.Schema({
   share_limit: { type: Number, default: 5 },
   invite_code: { type: String, unique: true, sparse: true },
   created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  status: { type: String, enum: ['waiting', 'active', 'archived'], default: 'waiting' },
+  status: { type: String, enum: ['waiting', 'active', 'archived', 'expired'], default: 'waiting' },
   duration_days: { type: Number, default: 30 },
   start_date: { type: Date },
   end_date: { type: Date },

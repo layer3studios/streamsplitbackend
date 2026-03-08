@@ -3,7 +3,7 @@ const GroupTransaction = require('../models/GroupTransaction');
 const EarningsAccount = require('../models/EarningsAccount');
 const WithdrawalRequest = require('../models/WithdrawalRequest');
 const GroupMembership = require('../models/GroupMembership');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 const { authenticate } = require('../middleware/auth');
 
 // ─── Helper: mature pending earnings ─────────────────────────

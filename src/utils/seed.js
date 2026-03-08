@@ -1,7 +1,7 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const crypto = require('crypto');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 
 const User = require('../models/User');
 const Category = require('../models/Category');

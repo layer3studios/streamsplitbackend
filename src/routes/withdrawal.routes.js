@@ -4,7 +4,7 @@ const WithdrawalRequest = require('../models/WithdrawalRequest');
 const EarningsAccount = require('../models/EarningsAccount');
 const WalletAccount = require('../models/WalletAccount');
 const WalletTransaction = require('../models/WalletTransaction');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 const { authenticate } = require('../middleware/auth');
 
 // ─── POST /withdrawals/request ───────────────────────────────

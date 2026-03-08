@@ -7,7 +7,7 @@ const Cart = require('../models/Cart');
 const WalletAccount = require('../models/WalletAccount');
 const WalletTransaction = require('../models/WalletTransaction');
 const Coupon = require('../models/Coupon');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 const { authenticate } = require('../middleware/auth');
 
 // ─── Razorpay Instance ──────────────────────────────────────────

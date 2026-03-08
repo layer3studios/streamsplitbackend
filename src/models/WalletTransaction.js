@@ -8,6 +8,8 @@ const schema = new mongoose.Schema({
   reference_type: String,
   reference_id: mongoose.Schema.Types.ObjectId,
   description: { type: String, default: '' },
+  razorpay_order_id: { type: String },
+  razorpay_payment_id: { type: String },
   idempotency_key: { type: String, unique: true, sparse: true },
 }, { timestamps: true });
 schema.index({ wallet_id: 1, createdAt: -1 });

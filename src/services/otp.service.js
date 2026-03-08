@@ -1,4 +1,4 @@
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 
 /** Generate a random N-digit OTP */
 function generateOTP() {

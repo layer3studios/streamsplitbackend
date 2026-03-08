@@ -10,7 +10,7 @@ const User = require('../models/User');
 const OtpRequest = require('../models/OtpRequest');
 const Session = require('../models/Session');
 const WalletAccount = require('../models/WalletAccount');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 
 const phoneSchema = Joi.object({ phone: Joi.string().pattern(/^\+?\d{10,15}$/).required() });
 const verifySchema = Joi.object({ phone: Joi.string().required(), otp: Joi.string().length(BRAND.auth.otpLength).required() });

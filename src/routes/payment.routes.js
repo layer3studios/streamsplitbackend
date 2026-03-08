@@ -6,7 +6,7 @@ const GroupTransaction = require('../models/GroupTransaction');
 const GroupInvite = require('../models/GroupInvite');
 const JoinIntent = require('../models/JoinIntent');
 const EarningsAccount = require('../models/EarningsAccount');
-const BRAND = require('../../brand.config');
+const BRAND = require('../../../brand.config');
 
 // ─── Helper: credit owner earnings respecting hold ────────────
 async function creditOwnerEarnings(ownerId, net) {
@@ -105,7 +105,7 @@ router.post('/razorpay/webhook', async (req, res) => {
         }
 
         // Verify signature
-        const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+        const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
         const signature = req.headers['x-razorpay-signature'];
         const expectedSig = crypto
             .createHmac('sha256', secret)
@@ -117,7 +117,7 @@ router.post('/razorpay/webhook', async (req, res) => {
             return res.status(400).json({ status: 'invalid_signature' });
         }
 
-        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        const body = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : (typeof req.body === 'string' ? JSON.parse(req.body) : req.body);
         const event = body.event;
         const payload = body.payload;
 
@@ -156,40 +156,7 @@ router.post('/razorpay/webhook', async (req, res) => {
                 return res.status(200).json({ status: 'ok' });
             }
 
-            // ─── Try GroupTransaction (direct join flow) ─────────
-            const existingTx = await GroupTransaction.findOne({ razorpay_payment_id: paymentId });
-            if (existingTx && existingTx.status === 'paid') {
-                console.log(`⚡ GroupTransaction already paid for payment ${paymentId} — idempotent skip`);
-                return res.status(200).json({ status: 'already_processed' });
-            }
-
-            const tx = await GroupTransaction.findOne({ razorpay_order_id: orderId, status: 'pending' });
-            if (tx) {
-                tx.razorpay_payment_id = paymentId;
-                tx.status = 'paid';
-                await tx.save();
-
-                // Add membership
-                const existingMem = await GroupMembership.findOne({ group_id: tx.group_id, user_id: tx.buyer_id });
-                if (!existingMem) {
-                    await GroupMembership.create({ group_id: tx.group_id, user_id: tx.buyer_id, role: 'member' });
-                    const updated = await Group.findByIdAndUpdate(tx.group_id, { $inc: { member_count: 1 } }, { new: true });
-                    if (updated && updated.member_count >= updated.share_limit) {
-                        updated.status = 'active';
-                        updated.start_date = new Date();
-                        updated.end_date = new Date(Date.now() + (updated.duration_days || 30) * 86400000);
-                        await updated.save();
-                    }
-                }
-
-                // Credit owner
-                const earningsAfter = await creditOwnerEarnings(tx.owner_id, tx.net);
-                console.log(`✅ DIRECT_JOIN_FINALIZED | txId=${tx._id} | orderId=${orderId} | paymentId=${paymentId} | net=${tx.net} | withdrawable=${earningsAfter.withdrawable_balance}`);
-
-                return res.status(200).json({ status: 'ok' });
-            }
-
-            console.warn(`⚠️ No JoinIntent or GroupTransaction for order ${orderId}`);
+            console.warn(`⚠️ No JoinIntent found for order ${orderId} — direct join flow is deprecated`);
             return res.status(200).json({ status: 'no_matching_record' });
         }
 
@@ -240,36 +207,8 @@ router.post('/verify-join', async (req, res, next) => {
             });
         }
 
-        // ─── Try GroupTransaction (direct flow) ──────────────
-        const tx = await GroupTransaction.findOne({ razorpay_order_id, status: 'pending' });
-        if (!tx) {
-            const existing = await GroupTransaction.findOne({ razorpay_payment_id });
-            if (existing && existing.status === 'paid') {
-                return res.json({ success: true, data: { group_id: existing.group_id, message: 'Payment already verified' } });
-            }
-            return res.status(404).json({ success: false, message: 'No matching record found' });
-        }
-
-        tx.razorpay_payment_id = razorpay_payment_id;
-        tx.status = 'paid';
-        await tx.save();
-
-        const existingMem = await GroupMembership.findOne({ group_id: tx.group_id, user_id: tx.buyer_id });
-        if (!existingMem) {
-            await GroupMembership.create({ group_id: tx.group_id, user_id: tx.buyer_id, role: 'member' });
-            const updated = await Group.findByIdAndUpdate(tx.group_id, { $inc: { member_count: 1 } }, { new: true });
-            if (updated && updated.member_count >= updated.share_limit) {
-                updated.status = 'active';
-                updated.start_date = new Date();
-                updated.end_date = new Date(Date.now() + (updated.duration_days || 30) * 86400000);
-                await updated.save();
-            }
-        }
-
-        await creditOwnerEarnings(tx.owner_id, tx.net);
-        console.log(`✅ VERIFY_DIRECT_FINALIZED | txId=${tx._id} | net=${tx.net}`);
-
-        res.json({ success: true, data: { group_id: tx.group_id, message: 'Payment verified, membership created' } });
+        console.warn(`⚠️ No JoinIntent found for order ${razorpay_order_id} — direct join flow is deprecated`);
+        return res.status(404).json({ success: false, message: 'No matching record found' });
     } catch (err) { next(err); }
 });
 

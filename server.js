@@ -9,8 +9,9 @@ const compression = require('compression');
 const cookieParser = require('cookie-parser');
 const { Server: SocketIO } = require('socket.io');
 const BRAND = require('../brand.config');
-const { apiLimiter } = require('./middleware/rateLimiter');
-const chatSocketHandler = require('./services/chatSocket');
+const { apiLimiter } = require('./src/middleware/rateLimiter');
+const chatSocketHandler = require('./src/services/chatSocket');
+const { startScheduler } = require('./src/jobs/scheduler');
 
 const app = express();
 const server = http.createServer(app);
@@ -73,35 +74,35 @@ app.get('/api/v1/health', (req, res) => {
 });
 
 // ─── API Routes ──────────────────────────────────────────────
-app.use('/api/v1/auth', require('./routes/auth.routes'));
-app.use('/api/v1/users', require('./routes/user.routes'));
-app.use('/api/v1/categories', require('./routes/category.routes'));
-app.use('/api/v1/brands', require('./routes/brand.routes'));
-app.use('/api/v1/plans', require('./routes/plan.routes'));
-app.use('/api/v1/cart', require('./routes/cart.routes'));
-app.use('/api/v1/orders', require('./routes/order.routes'));
-app.use('/api/v1/wallet', require('./routes/wallet.routes'));
-app.use('/api/v1/groups/invite', require('./routes/invite.routes'));
-app.use('/api/v1/groups', require('./routes/group.routes'));
-app.use('/api/v1/payments', require('./routes/payment.routes'));
-app.use('/api/v1/earnings', require('./routes/earnings.routes'));
-app.use('/api/v1/withdrawals', require('./routes/withdrawal.routes'));
-app.use('/api/v1/coupons', require('./routes/coupon.routes'));
-app.use('/api/v1/admin', require('./routes/admin.routes'));
-app.use('/api/v1/friends', require('./routes/friend.routes'));
-app.use('/api/v1/chat', require('./routes/chat.routes'));
-app.use('/api/v1/vault', require('./routes/vault.routes'));
-app.use('/api/v1/search', require('./routes/search.routes'));
+app.use('/api/v1/auth', require('./src/routes/auth.routes'));
+app.use('/api/v1/users', require('./src/routes/user.routes'));
+app.use('/api/v1/categories', require('./src/routes/category.routes'));
+app.use('/api/v1/brands', require('./src/routes/brand.routes'));
+app.use('/api/v1/plans', require('./src/routes/plan.routes'));
+app.use('/api/v1/cart', require('./src/routes/cart.routes'));
+app.use('/api/v1/orders', require('./src/routes/order.routes'));
+app.use('/api/v1/wallet', require('./src/routes/wallet.routes'));
+app.use('/api/v1/groups/invite', require('./src/routes/invite.routes'));
+app.use('/api/v1/groups', require('./src/routes/group.routes'));
+app.use('/api/v1/payments', require('./src/routes/payment.routes'));
+app.use('/api/v1/earnings', require('./src/routes/earnings.routes'));
+app.use('/api/v1/withdrawals', require('./src/routes/withdrawal.routes'));
+app.use('/api/v1/coupons', require('./src/routes/coupon.routes'));
+app.use('/api/v1/admin', require('./src/routes/admin.routes'));
+app.use('/api/v1/friends', require('./src/routes/friend.routes'));
+app.use('/api/v1/chat', require('./src/routes/chat.routes'));
+app.use('/api/v1/vault', require('./src/routes/vault.routes'));
+app.use('/api/v1/search', require('./src/routes/search.routes'));
 
 // ─── DEV: Audit join by JoinIntent ID ────────────────────────
 app.get('/api/v1/dev/audit/join/:id', async (req, res) => {
   if (process.env.NODE_ENV === 'production') return res.status(404).json({ success: false });
   try {
-    const JoinIntent = require('./models/JoinIntent');
-    const GroupTransaction = require('./models/GroupTransaction');
-    const EarningsAccount = require('./models/EarningsAccount');
-    const WalletAccount = require('./models/WalletAccount');
-    const GroupMembership = require('./models/GroupMembership');
+    const JoinIntent = require('./src/models/JoinIntent');
+    const GroupTransaction = require('./src/models/GroupTransaction');
+    const EarningsAccount = require('./src/models/EarningsAccount');
+    const WalletAccount = require('./src/models/WalletAccount');
+    const GroupMembership = require('./src/models/GroupMembership');
 
     const intent = await JoinIntent.findById(req.params.id).lean();
     if (!intent) return res.status(404).json({ success: false, message: 'JoinIntent not found' });
@@ -125,7 +126,7 @@ app.get('/api/v1/dev/audit/join/:id', async (req, res) => {
     });
 
     // Invariant checks
-    const WalletTransaction = require('./models/WalletTransaction');
+    const WalletTransaction = require('./src/models/WalletTransaction');
     const walletCreditForGroup = walletAcc
       ? await WalletTransaction.findOne({
         wallet_id: walletAcc._id,
@@ -162,9 +163,9 @@ app.get('/api/v1/dev/audit/owner/:id', async (req, res) => {
   if (process.env.NODE_ENV === 'production') return res.status(404).json({ success: false });
   try {
     const mongoose = require('mongoose');
-    const GroupTransaction = require('./models/GroupTransaction');
-    const EarningsAccount = require('./models/EarningsAccount');
-    const WalletAccount = require('./models/WalletAccount');
+    const GroupTransaction = require('./src/models/GroupTransaction');
+    const EarningsAccount = require('./src/models/EarningsAccount');
+    const WalletAccount = require('./src/models/WalletAccount');
 
     const ownerId = new mongoose.Types.ObjectId(req.params.id);
 
@@ -226,6 +227,7 @@ const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/subspace
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log(`✅ MongoDB connected`);
+    startScheduler();
     server.listen(PORT, () => {
       console.log(`🚀 ${BRAND.name} API running on port ${PORT}`);
     });
