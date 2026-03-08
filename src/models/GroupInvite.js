@@ -9,6 +9,7 @@ const schema = new mongoose.Schema({
     max_uses: { type: Number, default: null },
     uses_count: { type: Number, default: 0 },
     expires_at: { type: Date, default: null },
+    no_expiry: { type: Boolean, default: false },
 }, { timestamps: true });
 
 schema.index({ group_id: 1 });
@@ -18,8 +19,8 @@ schema.pre('save', function (next) {
     if (!this.code) {
         this.code = crypto.randomBytes(5).toString('hex').toUpperCase();
     }
-    // Set default TTL of 60 minutes if not set
-    if (!this.expires_at) {
+    // Set default TTL of 60 minutes — skip if explicitly marked no_expiry
+    if (!this.expires_at && !this.no_expiry) {
         const ttl = parseInt(process.env.INVITE_TTL_MINUTES || '60', 10);
         this.expires_at = new Date(Date.now() + ttl * 60 * 1000);
     }

@@ -11,8 +11,10 @@ const BRAND = require('../../../brand.config');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 
 let razorpay = null;
-if (process.env.RAZORPAY_KEY_ID && !process.env.RAZORPAY_KEY_ID.includes('xxxxx')) {
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
     razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+} else {
+    console.error('❌ RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing — paid joins will fail');
 }
 
 // ─── Helper: validate invite ──────────────────────────────────
@@ -20,8 +22,28 @@ async function resolveInviteByCode(code) {
     const normalized = (code || '').trim().toUpperCase();
     if (!normalized) return { error: 'MISSING_CODE', status: 400 };
 
-    const invite = await GroupInvite.findOne({ code: new RegExp(`^${normalized}$`, 'i') });
-    if (!invite) return { error: 'NOT_FOUND', status: 404 };
+    let invite = await GroupInvite.findOne({ code: new RegExp(`^${normalized}$`, 'i') });
+
+    // Fallback: if no GroupInvite exists, check Group.invite_code (legacy groups)
+    if (!invite) {
+        const group = await Group.findOne({ invite_code: new RegExp(`^${normalized}$`, 'i') })
+            .populate('brand_id', 'name slug logo_url')
+            .populate('created_by', 'name');
+        if (!group) return { error: 'NOT_FOUND', status: 404 };
+        if (group.status === 'archived' || group.status === 'expired') {
+            return { error: 'GROUP_CLOSED', status: 410 };
+        }
+        // Auto-create the missing GroupInvite for this legacy group
+        invite = await GroupInvite.create({
+            group_id: group._id,
+            created_by: group.created_by._id || group.created_by,
+            created_by_role: 'owner',
+            code: group.invite_code,
+            status: 'active',
+            no_expiry: true,
+        });
+        return { invite, group };
+    }
     if (invite.status !== 'active') return { error: 'DISABLED', status: 410 };
     if (invite.expires_at && new Date() > invite.expires_at) return { error: 'EXPIRED', status: 410 };
     if (invite.max_uses && invite.uses_count >= invite.max_uses) return { error: 'MAX_USES', status: 410 };
@@ -110,7 +132,7 @@ router.post('/:code/join/initiate', authenticate, async (req, res, next) => {
         }
 
         const amount = group.share_price || 0;
-        const paymentMethod = req.body.payment_method || 'dev';
+        const paymentMethod = req.body.payment_method || 'razorpay';
         const intentData = {
             invite_code: invite.code,
             group_id: group._id,
@@ -154,68 +176,30 @@ router.post('/:code/join/initiate', authenticate, async (req, res, next) => {
         }
 
         // Razorpay
-        if (paymentMethod === 'razorpay' && razorpay) {
-            const order = await razorpay.orders.create({
-                amount: Math.round(amount * 100),
-                currency: 'INR',
-                receipt: `join_${group._id}_${req.user._id}`.substring(0, 40),
-            });
-            intentData.razorpay_order_id = order.id;
-            const intent = await JoinIntent.create(intentData);
-
-            console.log(`📋 JOIN_INTENT_CREATED (razorpay) | intentId=${intent._id} | orderId=${order.id} | gross=${amount}`);
-
-            return res.json({
-                success: true,
-                data: {
-                    joinIntentId: intent._id,
-                    amount: order.amount,
-                    currency: order.currency,
-                    razorpay_order_id: order.id,
-                    razorpay_key_id: process.env.RAZORPAY_KEY_ID,
-                },
-            });
+        if (!razorpay) {
+            return res.status(500).json({ success: false, message: 'Payment gateway not configured' });
         }
-
-        // Dev fallback
-        intentData.razorpay_payment_id = `dev_${Date.now()}`;
+        const order = await razorpay.orders.create({
+            amount: Math.round(amount * 100),
+            currency: 'INR',
+            receipt: `join_${group._id}_${req.user._id}`.substring(0, 40),
+        });
+        intentData.payment_method = 'razorpay';
+        intentData.razorpay_order_id = order.id;
         const intent = await JoinIntent.create(intentData);
-        console.log(`📋 JOIN_INTENT_CREATED (dev) | intentId=${intent._id} | groupId=${group._id} | amount=${amount}`);
+
+        console.log(`📋 JOIN_INTENT_CREATED (razorpay) | intentId=${intent._id} | orderId=${order.id} | gross=${amount}`);
+
         return res.json({
             success: true,
-            data: { joinIntentId: intent._id, amount, currency: 'INR', payment_method: 'dev' },
+            data: {
+                joinIntentId: intent._id,
+                amount: order.amount,
+                currency: order.currency,
+                razorpay_order_id: order.id,
+                razorpay_key_id: process.env.RAZORPAY_KEY_ID,
+            },
         });
-    } catch (err) { next(err); }
-});
-
-// ─── POST /invite/:code/join/confirm — Dev confirmation ──────
-router.post('/:code/join/confirm', authenticate, async (req, res, next) => {
-    try {
-        if (process.env.NODE_ENV === 'production') {
-            return res.status(403).json({ success: false, message: 'Dev confirm not available in production' });
-        }
-
-        const { joinIntentId } = req.body;
-        if (!joinIntentId) return res.status(400).json({ success: false, message: 'joinIntentId required' });
-
-        const intent = await JoinIntent.findOne({ _id: joinIntentId, user_id: req.user._id, status: 'initiated' });
-        if (!intent) return res.status(404).json({ success: false, message: 'No pending join intent found' });
-
-        const group = await Group.findById(intent.group_id);
-        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
-
-        const invite = await GroupInvite.findOne({ code: new RegExp(`^${intent.invite_code}$`, 'i'), status: 'active' });
-        if (!invite) return res.status(410).json({ success: false, message: 'Invite no longer valid' });
-
-        // Mark paid
-        intent.status = 'paid';
-        intent.razorpay_payment_id = `dev_confirm_${Date.now()}`;
-        await intent.save();
-
-        await joinAndCreditEarnings(group, req.user._id, invite, intent);
-
-        console.log(`✅ DEV_CONFIRM | intentId=${intent._id} | groupId=${group._id}`);
-        res.json({ success: true, data: { group_id: group._id, joinIntentId: intent._id }, message: 'Joined successfully' });
     } catch (err) { next(err); }
 });
 

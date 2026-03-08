@@ -7,9 +7,9 @@ const WalletTransaction = require('../models/WalletTransaction');
 const { authenticate } = require('../middleware/auth');
 const BRAND = require('../../../brand.config');
 
-let razorpay;
-if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
-    razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+const razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
+if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    console.error('❌ RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing — wallet topup will fail');
 }
 
 router.get('/', authenticate, async (req, res, next) => {
@@ -87,25 +87,6 @@ router.post('/topup/initiate', authenticate, async (req, res, next) => {
     const wallet = await WalletAccount.findOne({ user_id: req.user._id });
     if (wallet && wallet.balance + amount > BRAND.wallet.maxBalance) {
       return res.status(400).json({ success: false, message: `Max wallet balance is ${BRAND.formatPrice(BRAND.wallet.maxBalance)}` });
-    }
-
-    // Dev mode: direct credit without payment
-    if (!razorpay || process.env.NODE_ENV !== 'production') {
-      const session = await mongoose.startSession();
-      try {
-        session.startTransaction();
-        let w = wallet || await WalletAccount.create([{ user_id: req.user._id }], { session }).then(r => r[0]);
-        w.balance += amount;
-        await w.save({ session });
-        await WalletTransaction.create([{
-          wallet_id: w._id, type: 'credit', amount,
-          balance_after: w.balance, source: 'topup',
-          description: `Wallet top-up of ${BRAND.formatPrice(amount)} (dev)`,
-        }], { session });
-        await session.commitTransaction();
-        return res.json({ success: true, data: { dev: true, wallet: w } });
-      } catch (err) { await session.abortTransaction(); throw err; }
-      finally { session.endSession(); }
     }
 
     const order = await razorpay.orders.create({

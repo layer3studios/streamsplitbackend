@@ -77,13 +77,14 @@ router.post('/', authenticate, async (req, res, next) => {
       { upsert: true }
     );
 
-    // Create default GroupInvite so invite-based join always works
+    // Create default GroupInvite using same code as Group.invite_code
     await GroupInvite.create({
       group_id: group._id,
       created_by: req.user._id,
       created_by_role: 'owner',
+      code: group.invite_code,
       status: 'active',
-      expires_at: null, // no expiry for default invite
+      no_expiry: true, // bypass TTL in pre-save hook
     });
 
     res.status(201).json({ success: true, data: group });
