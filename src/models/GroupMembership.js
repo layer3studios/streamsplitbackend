@@ -5,6 +5,8 @@ const schema = new mongoose.Schema({
   role: { type: String, enum: ['member', 'moderator', 'owner'], default: 'member' },
   status: { type: String, enum: ['active', 'left', 'removed'], default: 'active' },
   is_muted: { type: Boolean, default: false },
+  is_verified: { type: Boolean, default: false },
+  verified_at: { type: Date, default: null },
   joined_at: { type: Date, default: Date.now },
   left_at: { type: Date, default: null },
   paid_until: { type: Date, default: null },

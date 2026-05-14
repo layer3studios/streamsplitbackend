@@ -150,7 +150,7 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
     const membership = await GroupMembership.findOne({ group_id: req.params.id, user_id: uid });
     if (!membership) return res.status(403).json({ success: false, message: 'Not a member of this group' });
 
-    const group = await Group.findById(req.params.id).select('name share_limit member_count created_by');
+    const group = await Group.findById(req.params.id).select('name share_limit member_count created_by invite_code');
     if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
 
     const members = await GroupMembership.find({ group_id: req.params.id })
@@ -168,6 +168,7 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
       phone_masked: maskPhone(m.user_id.phone),
       role: m.role === 'owner' ? 'OWNER' : 'MEMBER',
       joined_at: m.joined_at,
+      is_verified: m.is_verified || false,
       is_you: m.user_id._id.toString() === uid.toString(),
     }));
 
@@ -180,6 +181,7 @@ router.get('/:id/members', authenticate, async (req, res, next) => {
           share_limit: group.share_limit,
           member_count: group.member_count,
           owner_id: group.created_by,
+          invite_code: group.invite_code,
         },
         members: memberList,
       },
@@ -382,6 +384,45 @@ router.post('/:id/logged-out', authenticate, async (req, res, next) => {
     await ChatRoom.findByIdAndUpdate(room._id, { last_message_at: msg.createdAt, last_message_preview: msg.content.substring(0, 80) });
 
     res.json({ success: true, message: 'Help request sent to group chat' });
+  } catch (err) { next(err); }
+});
+
+// ─── PATCH /groups/:id/members/:userId/verify — Toggle member verification ──
+router.patch('/:id/members/:userId/verify', authenticate, async (req, res, next) => {
+  try {
+    // Only the owner can verify members
+    const ownerMembership = await GroupMembership.findOne({ group_id: req.params.id, user_id: req.user._id, role: 'owner' });
+    if (!ownerMembership) return res.status(403).json({ success: false, message: 'Only the owner can verify members' });
+
+    const membership = await GroupMembership.findOne({ group_id: req.params.id, user_id: req.params.userId });
+    if (!membership) return res.status(404).json({ success: false, message: 'Member not found' });
+
+    const verified = req.body.verified !== false; // default true
+    membership.is_verified = verified;
+    membership.verified_at = verified ? new Date() : null;
+    await membership.save();
+
+    res.json({ success: true, data: { user_id: membership.user_id, is_verified: membership.is_verified, verified_at: membership.verified_at } });
+  } catch (err) { next(err); }
+});
+
+// ─── POST /groups/:id/members/:userId/remove — Owner removes a member ──
+router.post('/:id/members/:userId/remove', authenticate, async (req, res, next) => {
+  try {
+    const ownerMembership = await GroupMembership.findOne({ group_id: req.params.id, user_id: req.user._id, role: 'owner' });
+    if (!ownerMembership) return res.status(403).json({ success: false, message: 'Only the owner can remove members' });
+
+    if (req.params.userId === req.user._id.toString()) {
+      return res.status(400).json({ success: false, message: 'Cannot remove yourself. Use archive instead.' });
+    }
+
+    const membership = await GroupMembership.findOne({ group_id: req.params.id, user_id: req.params.userId });
+    if (!membership) return res.status(404).json({ success: false, message: 'Member not found' });
+
+    await GroupMembership.deleteOne({ _id: membership._id });
+    await Group.findByIdAndUpdate(req.params.id, { $inc: { member_count: -1 } });
+
+    res.json({ success: true, message: 'Member removed' });
   } catch (err) { next(err); }
 });
 

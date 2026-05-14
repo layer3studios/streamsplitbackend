@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const schema = new mongoose.Schema({
   brand_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Brand', required: true },
+  group_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', default: null },
   name: { type: String, required: true },
   description: { type: String, default: '' },
   price: { type: Number, required: true },

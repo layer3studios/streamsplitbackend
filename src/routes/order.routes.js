@@ -4,6 +4,11 @@ const { v4: uuidv4 } = require('uuid');
 const Razorpay = require('razorpay');
 const Order = require('../models/Order');
 const Cart = require('../models/Cart');
+const Plan = require('../models/Plan');
+const Group = require('../models/Group');
+const GroupMembership = require('../models/GroupMembership');
+const GroupTransaction = require('../models/GroupTransaction');
+const EarningsAccount = require('../models/EarningsAccount');
 const WalletAccount = require('../models/WalletAccount');
 const WalletTransaction = require('../models/WalletTransaction');
 const Coupon = require('../models/Coupon');
@@ -21,6 +26,99 @@ const generateOrderNumber = () => {
   const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   return `ORD-${date}-${uuidv4().slice(0, 6).toUpperCase()}`;
 };
+
+// ─── fulfillOrderMemberships — auto-join groups for plans with group_id ──
+async function fulfillOrderMemberships(order) {
+  for (const item of order.items) {
+    try {
+      const plan = await Plan.findById(item.plan_id);
+      if (!plan || !plan.group_id) continue;
+
+      const group = await Group.findById(plan.group_id);
+      if (!group || group.status === 'archived') continue;
+
+      // Idempotency: skip if user is already a non-left member
+      const existingMem = await GroupMembership.findOne({
+        group_id: group._id, user_id: order.user_id, status: { $ne: 'left' },
+      });
+      if (existingMem) {
+        console.log(`⚡ Already member of group ${group._id} — skipping`);
+        continue;
+      }
+
+      // Skip if group is full
+      if (group.member_count >= group.share_limit) {
+        console.warn(`⚠️ Group ${group._id} is full (${group.member_count}/${group.share_limit}) — cannot add member`);
+        continue;
+      }
+
+      // Create membership
+      await GroupMembership.create({
+        group_id: group._id, user_id: order.user_id, role: 'member',
+        status: 'active', joined_at: new Date(),
+        paid_until: new Date(Date.now() + (group.duration_days || 30) * 86400000),
+      });
+
+      // Increment member count + activate if full
+      const updatedGroup = await Group.findByIdAndUpdate(
+        group._id, { $inc: { member_count: 1 } }, { new: true }
+      );
+      if (updatedGroup.member_count >= updatedGroup.share_limit && updatedGroup.status === 'waiting') {
+        updatedGroup.status = 'active';
+        updatedGroup.start_date = new Date();
+        updatedGroup.end_date = new Date(Date.now() + (updatedGroup.duration_days || 30) * 86400000);
+        await updatedGroup.save();
+        console.log(`✅ GROUP_ACTIVATED | groupId=${group._id} | name=${group.name}`);
+      }
+
+      // Find group owner for earnings credit
+      const ownerMem = await GroupMembership.findOne({ group_id: group._id, role: 'owner' });
+      if (!ownerMem) {
+        console.error(`❌ No owner found for group ${group._id}`);
+        continue;
+      }
+
+      // Compute fee split
+      const gross = plan.price * (item.quantity || 1);
+      const feePercent = BRAND.money.platformCutPercent;
+      const feeAmount = Math.round(gross * feePercent / 100);
+      const net = gross - feeAmount;
+      const holdHours = BRAND.money.withdrawalHoldHours || 0;
+      const pendingReleaseAt = holdHours > 0 ? new Date(Date.now() + holdHours * 3600000) : null;
+
+      // Idempotent: skip if GroupTransaction already exists for this order+group+user
+      const idempotencyKey = `order_${order._id}_group_${group._id}_user_${order.user_id}`;
+      const existingTx = await GroupTransaction.findOne({
+        group_id: group._id, buyer_id: order.user_id,
+        razorpay_order_id: order.pg_order_id || idempotencyKey,
+      });
+
+      if (!existingTx) {
+        await GroupTransaction.create({
+          group_id: group._id, owner_id: ownerMem.user_id, buyer_id: order.user_id,
+          gross, fee_percent: feePercent, fee_amount: feeAmount, net,
+          razorpay_order_id: order.pg_order_id || idempotencyKey,
+          razorpay_payment_id: order.pg_payment_id || `wallet_order_${order._id}`,
+          pending_release_at: pendingReleaseAt, status: 'paid',
+        });
+
+        // Credit owner earnings
+        const earningsInc = holdHours > 0
+          ? { pending_balance: net, total_earned: net }
+          : { withdrawable_balance: net, total_earned: net };
+        await EarningsAccount.findOneAndUpdate(
+          { user_id: ownerMem.user_id }, { $inc: earningsInc }, { upsert: true }
+        );
+        console.log(`💰 EARNINGS_CREDITED | ownerId=${ownerMem.user_id} | gross=${gross} | net=${net} | group=${group.name}`);
+      }
+
+      console.log(`✅ GROUP_JOIN_VIA_ORDER | userId=${order.user_id} | groupId=${group._id} | orderId=${order._id}`);
+    } catch (err) {
+      // Log but don't throw — don't fail the whole order if one group join fails
+      console.error(`❌ fulfillOrderMemberships error for item ${item.plan_id}:`, err.message);
+    }
+  }
+}
 
 // ─── GET /orders — user order history ────────────────────────────
 router.get('/', authenticate, async (req, res, next) => {
@@ -106,6 +204,9 @@ router.post('/checkout', authenticate, async (req, res, next) => {
       orderData.status = 'fulfilled';
       const order = await Order.create(orderData);
 
+      // Auto-join groups for plans linked to groups
+      await fulfillOrderMemberships(order);
+
       cart.status = 'checked_out';
       await cart.save();
 
@@ -185,7 +286,10 @@ router.post('/verify-payment', authenticate, async (req, res, next) => {
 
     await order.save();
 
-    // 4) Mark cart as checked out
+    // 4) Auto-join groups for plans linked to groups
+    await fulfillOrderMemberships(order);
+
+    // 5) Mark cart as checked out
     await Cart.findOneAndUpdate(
       { user_id: req.user._id, status: 'active' },
       { status: 'checked_out' }

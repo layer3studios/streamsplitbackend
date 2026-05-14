@@ -120,18 +120,18 @@ async function seed() {
   // ─── Groups (owned by different users) ──────────
   const groupSpecs = [
     // Admin-owned groups
-    { name: 'Netflix Family Share', brand: 0, share_price: 162, share_limit: 4, owner: admin, desc: 'Premium plan split 4 ways' },
-    { name: 'YouTube Premium Family', brand: 3, share_price: 50, share_limit: 6, owner: admin, desc: 'Ad-free YouTube for everyone' },
+    { name: 'Netflix Family Share', brand: 0, planName: 'Premium', share_price: 162, share_limit: 4, owner: admin, desc: 'Premium plan split 4 ways' },
+    { name: 'YouTube Premium Family', brand: 3, planName: 'Family', share_price: 50, share_limit: 6, owner: admin, desc: 'Ad-free YouTube for everyone' },
     // Test A-owned groups
-    { name: 'Spotify Family Plan', brand: 4, share_price: 33, share_limit: 6, owner: testA, desc: 'Music streaming split 6 ways' },
-    { name: 'Canva Pro Team', brand: 10, share_price: 100, share_limit: 5, owner: testA, desc: 'Design tools for the team' },
+    { name: 'Spotify Family Plan', brand: 4, planName: 'Family', share_price: 33, share_limit: 6, owner: testA, desc: 'Music streaming split 6 ways' },
+    { name: 'Canva Pro Team', brand: 10, planName: 'Monthly', share_price: 100, share_limit: 5, owner: testA, desc: 'Design tools for the team' },
     // Test B-owned group
-    { name: 'Disney+ Group Watch', brand: 1, share_price: 125, share_limit: 4, owner: testB, desc: 'Watch Disney+ together' },
+    { name: 'Disney+ Group Watch', brand: 1, planName: 'Premium', share_price: 125, share_limit: 4, owner: testB, desc: 'Watch Disney+ together' },
     // Test C-owned groups
-    { name: 'NordVPN Team', brand: 9, share_price: 66, share_limit: 6, owner: testC, desc: 'VPN protection for the group' },
-    { name: 'Xbox Game Pass Squad', brand: 7, share_price: 110, share_limit: 5, owner: testC, desc: 'Game together for less' },
+    { name: 'NordVPN Team', brand: 9, planName: '1 Month', share_price: 66, share_limit: 6, owner: testC, desc: 'VPN protection for the group' },
+    { name: 'Xbox Game Pass Squad', brand: 7, planName: 'Core', share_price: 110, share_limit: 5, owner: testC, desc: 'Game together for less' },
     // Test D-owned group (will be nearly full)
-    { name: 'Coursera Plus Study Group', brand: 8, share_price: 200, share_limit: 4, owner: testD, desc: 'Learn together and save' },
+    { name: 'Coursera Plus Study Group', brand: 8, planName: 'Annual', share_price: 200, share_limit: 4, owner: testD, desc: 'Learn together and save' },
   ];
 
   const groups = [];
@@ -151,6 +151,17 @@ async function seed() {
     // Owner membership
     await GroupMembership.create({ group_id: g._id, user_id: gs.owner._id, role: 'owner' });
     groups.push(g);
+  }
+
+  // ─── Link plans to groups ──────────────────────
+  for (const gs of groupSpecs) {
+    const group = groups[groupSpecs.indexOf(gs)];
+    if (gs.planName) {
+      await Plan.findOneAndUpdate(
+        { brand_id: brands[gs.brand]._id, name: gs.planName },
+        { group_id: group._id }
+      );
+    }
   }
 
   // ─── Add members to some groups (realistic fill levels) ──
