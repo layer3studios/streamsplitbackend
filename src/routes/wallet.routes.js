@@ -12,11 +12,30 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     console.error('❌ RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing — wallet topup will fail');
 }
 
+const Order = require('../models/Order');
+const Withdrawal = require('../models/WithdrawalRequest');
+const User = require('../models/User');
+
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    let wallet = await WalletAccount.findOne({ user_id: req.user._id });
-    if (!wallet) wallet = await WalletAccount.create({ user_id: req.user._id });
-    res.json({ success: true, data: wallet });
+    const user = await User.findById(req.user._id);
+
+    // Calculate Pending Escrow
+    const activeOrders = await Order.find({ sellerId: user._id, status: { $in: ['active', 'pending_delivery', 'delivered'] } });
+    const pendingInEscrow = activeOrders.reduce((sum, order) => sum + (order.escrowPending || order.amount), 0);
+
+    // Calculate Lifetime Withdrawn
+    const paidWithdrawals = await Withdrawal.find({ sellerId: user._id, status: 'completed' });
+    const lifetimeWithdrawn = paidWithdrawals.reduce((sum, w) => sum + w.amount, 0);
+
+    res.json({ 
+      success: true, 
+      data: {
+        availableBalance: user.walletBalance || 0,
+        pendingInEscrow,
+        lifetimeWithdrawn
+      }
+    });
   } catch (err) { next(err); }
 });
 

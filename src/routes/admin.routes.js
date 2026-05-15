@@ -1,378 +1,295 @@
 const router = require('express').Router();
-const mongoose = require('mongoose');
-const { authenticate, requireRole } = require('../middleware/auth');
 const User = require('../models/User');
 const Order = require('../models/Order');
-const WalletAccount = require('../models/WalletAccount');
-const WalletTransaction = require('../models/WalletTransaction');
-const Group = require('../models/Group');
-const GroupMembership = require('../models/GroupMembership');
-const Coupon = require('../models/Coupon');
-const Brand = require('../models/Brand');
-const Plan = require('../models/Plan');
-const Category = require('../models/Category');
+const Dispute = require('../models/Dispute');
+const Withdrawal = require('../models/WithdrawalRequest');
+const Listing = require('../models/Listing');
+const { authenticate } = require('../middleware/auth');
 
-// All routes require admin
-router.use(authenticate, requireRole('admin', 'super_admin'));
+// Middleware to ensure user is admin
+const isAdmin = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user || !['admin', 'super_admin'].includes(user.role)) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+    next();
+  } catch (err) { next(err); }
+};
 
-// ─── Overview Stats ──────────────────────────────────────────
-router.get('/overview', async (req, res, next) => {
-    try {
-        const [totalUsers, totalOrders, totalGroups, activeGroups, recentUsers, recentOrders, revenueAgg] = await Promise.all([
-            User.countDocuments(),
-            Order.countDocuments(),
-            Group.countDocuments(),
-            Group.countDocuments({ status: 'active' }),
-            User.find().sort({ createdAt: -1 }).limit(10).select('name phone role status createdAt last_login_at'),
-            Order.find().sort({ createdAt: -1 }).limit(10).select('order_number user_id total status payment_method createdAt'),
-            Order.aggregate([
-                { $match: { status: 'fulfilled' } },
-                { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } },
-            ]),
-        ]);
+router.use(authenticate, isAdmin);
 
-        const revenue = revenueAgg[0]?.total || 0;
-        const fulfilledCount = revenueAgg[0]?.count || 0;
+// ─── DASHBOARD ──────────────────────────────────────────────
+router.get('/dashboard', async (req, res, next) => {
+  try {
+    const now = new Date();
+    const todayStart = new Date(now); todayStart.setHours(0,0,0,0);
+    const weekStart = new Date(now); weekStart.setDate(weekStart.getDate() - 7);
+    const monthStart = new Date(now); monthStart.setDate(1); monthStart.setHours(0,0,0,0);
 
-        res.json({
-            success: true,
-            data: {
-                stats: { totalUsers, totalOrders, fulfilledCount, revenue, totalGroups, activeGroups },
-                recentUsers,
-                recentOrders,
-            },
-        });
-    } catch (err) { next(err); }
+    const [totalUsers, activeListings, pendingWithdrawals, openDisputes, newUsersToday, pendingListings] = await Promise.all([
+      User.countDocuments(),
+      Listing.countDocuments({ status: 'active' }),
+      Withdrawal.countDocuments({ status: 'pending' }),
+      Dispute.countDocuments({ status: 'open' }),
+      User.countDocuments({ createdAt: { $gte: todayStart } }),
+      Listing.countDocuments({ status: 'pending_review' })
+    ]);
+
+    // Revenue aggregation
+    const revenueAgg = await Order.aggregate([
+      { $match: { status: { $in: ['active', 'completed', 'delivered'] } } },
+      { $group: {
+        _id: null,
+        total: { $sum: '$amount' },
+        today: { $sum: { $cond: [{ $gte: ['$createdAt', todayStart] }, '$amount', 0] } },
+        thisWeek: { $sum: { $cond: [{ $gte: ['$createdAt', weekStart] }, '$amount', 0] } },
+        thisMonth: { $sum: { $cond: [{ $gte: ['$createdAt', monthStart] }, '$amount', 0] } },
+        activeOrdersCount: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } }
+      }}
+    ]);
+    const rev = revenueAgg[0] || { total: 0, today: 0, thisWeek: 0, thisMonth: 0, activeOrdersCount: 0 };
+
+    res.json({ success: true, data: {
+      totalUsers, newUsersToday, activeListings, pendingListings,
+      pendingWithdrawals, openDisputes,
+      activeOrdersCount: rev.activeOrdersCount,
+      revenue: { today: rev.today, thisWeek: rev.thisWeek, thisMonth: rev.thisMonth, total: rev.total }
+    }});
+  } catch (err) { next(err); }
 });
 
-// ─── User Management ─────────────────────────────────────────
+// ─── USERS ──────────────────────────────────────────────────
 router.get('/users', async (req, res, next) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const filter = {};
-
-        if (req.query.search) {
-            filter.$or = [
-                { name: { $regex: req.query.search, $options: 'i' } },
-                { phone: { $regex: req.query.search, $options: 'i' } },
-            ];
-        }
-        if (req.query.role) filter.role = req.query.role;
-        if (req.query.status) filter.status = req.query.status;
-
-        const [users, total] = await Promise.all([
-            User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).select('-__v'),
-            User.countDocuments(filter),
-        ]);
-
-        // Attach wallet balances
-        const userIds = users.map(u => u._id);
-        const wallets = await WalletAccount.find({ user_id: { $in: userIds } }).select('user_id balance');
-        const walletMap = {};
-        wallets.forEach(w => { walletMap[w.user_id.toString()] = w.balance; });
-
-        const enriched = users.map(u => ({
-            ...u.toObject(),
-            wallet_balance: walletMap[u._id.toString()] || 0,
-        }));
-
-        res.json({ success: true, data: enriched, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
-    } catch (err) { next(err); }
+  try {
+    const users = await User.find().sort({ createdAt: -1 });
+    res.json({ success: true, data: users });
+  } catch (err) { next(err); }
 });
 
-router.get('/users/:id', async (req, res, next) => {
-    try {
-        const user = await User.findById(req.params.id).select('-__v');
-        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-        const [wallet, orders, transactions, memberships] = await Promise.all([
-            WalletAccount.findOne({ user_id: user._id }),
-            Order.find({ user_id: user._id }).sort({ createdAt: -1 }).limit(20),
-            WalletTransaction.find({}).populate('wallet_id').sort({ createdAt: -1 }).limit(20),
-            GroupMembership.find({ user_id: user._id }).populate('group_id'),
-        ]);
-
-        // Filter transactions for this user's wallet
-        const userTxns = wallet ? await WalletTransaction.find({ wallet_id: wallet._id }).sort({ createdAt: -1 }).limit(20) : [];
-
-        res.json({
-            success: true,
-            data: {
-                user,
-                wallet: wallet || { balance: 0 },
-                orders,
-                transactions: userTxns,
-                groups: memberships.map(m => m.group_id).filter(Boolean),
-            },
-        });
-    } catch (err) { next(err); }
+router.put('/users/:id', async (req, res, next) => {
+  try {
+    const { isBanned } = req.body;
+    const user = await User.findByIdAndUpdate(req.params.id, { isBanned }, { new: true });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, data: user, message: isBanned ? 'User banned' : 'User unbanned' });
+  } catch (err) { next(err); }
 });
 
-router.patch('/users/:id', async (req, res, next) => {
-    try {
-        const allowed = ['role', 'status', 'name'];
-        const updates = {};
-        allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
-
-        // Prevent changing own role
-        if (req.params.id === req.user._id.toString() && updates.role) {
-            return res.status(400).json({ success: false, message: 'Cannot change your own role' });
-        }
-
-        const user = await User.findByIdAndUpdate(req.params.id, updates, { new: true }).select('-__v');
-        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-        res.json({ success: true, data: user });
-    } catch (err) { next(err); }
+// ─── LISTINGS ───────────────────────────────────────────────
+router.get('/listings', async (req, res, next) => {
+  try {
+    const listings = await Listing.find().sort({ createdAt: -1 });
+    res.json({ success: true, data: listings });
+  } catch (err) { next(err); }
 });
 
-// ─── Order Management ────────────────────────────────────────
+router.put('/listings/:id', async (req, res, next) => {
+  try {
+    const { status } = req.body; // e.g. 'active', 'rejected'
+    const listing = await Listing.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    if (!listing) return res.status(404).json({ success: false, message: 'Listing not found' });
+    res.json({ success: true, data: listing });
+  } catch (err) { next(err); }
+});
+
+// ─── ORDERS ─────────────────────────────────────────────────
 router.get('/orders', async (req, res, next) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const filter = {};
-
-        if (req.query.status) filter.status = req.query.status;
-        if (req.query.user_id) filter.user_id = req.query.user_id;
-
-        const [orders, total] = await Promise.all([
-            Order.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
-            Order.countDocuments(filter),
-        ]);
-
-        res.json({ success: true, data: orders, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
-    } catch (err) { next(err); }
+  try {
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.type) filter.type = req.query.type;
+    if (req.query.platform) filter.platform = req.query.platform;
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {};
+      if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
+    }
+    const orders = await Order.find(filter)
+      .populate('buyerId', 'name phone')
+      .populate('sellerId', 'name phone')
+      .sort({ createdAt: -1 });
+    res.json({ success: true, data: orders });
+  } catch (err) { next(err); }
 });
 
-router.patch('/orders/:id', async (req, res, next) => {
-    try {
-        const allowed = ['status'];
-        const updates = {};
-        allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+// PUT /admin/orders/:id — Force-refund or force-complete any order
+router.put('/orders/:id', async (req, res, next) => {
+  try {
+    const { action } = req.body; // 'force_refund' or 'force_complete'
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-        const order = await Order.findByIdAndUpdate(req.params.id, updates, { new: true });
-        if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (action === 'force_refund') {
+      order.status = 'refunded';
+      // Restore slots/quantity
+      const listing = await Listing.findById(order.listingId);
+      if (listing) {
+        if (order.type === 'subscription') listing.filledSlots = Math.max(0, listing.filledSlots - 1);
+        else if (order.type === 'marketplace') listing.quantity += 1;
+        await listing.save();
+      }
+      order.escrowPending = 0;
+      await order.save();
+    } else if (action === 'force_complete') {
+      // Release remaining escrow to seller
+      const seller = await User.findById(order.sellerId);
+      if (seller && order.escrowPending > 0) {
+        seller.walletBalance = (seller.walletBalance || 0) + order.escrowPending;
+        await seller.save();
+      }
+      order.escrowReleased = (order.escrowReleased || 0) + (order.escrowPending || 0);
+      order.escrowPending = 0;
+      order.status = 'completed';
+      await order.save();
+    } else {
+      return res.status(400).json({ success: false, message: 'action must be force_refund or force_complete' });
+    }
 
-        res.json({ success: true, data: order });
-    } catch (err) { next(err); }
+    res.json({ success: true, message: `Order ${action} successful`, data: order });
+  } catch (err) { next(err); }
 });
 
-// ─── Group Management ────────────────────────────────────────
-router.get('/groups', async (req, res, next) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-
-        const [groups, total] = await Promise.all([
-            Group.find().populate('brand_id', 'name logo_url').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
-            Group.countDocuments(),
-        ]);
-
-        res.json({ success: true, data: groups, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
-    } catch (err) { next(err); }
-});
-
-// ─── Coupon Management ───────────────────────────────────────
-router.get('/coupons', async (req, res, next) => {
-    try {
-        const coupons = await Coupon.find().sort({ createdAt: -1 });
-        res.json({ success: true, data: coupons });
-    } catch (err) { next(err); }
-});
-
-router.post('/coupons', async (req, res, next) => {
-    try {
-        const { code, type, value, max_discount, min_order_value, usage_limit, valid_until } = req.body;
-        if (!code || !type || value === undefined) {
-            return res.status(400).json({ success: false, message: 'code, type, and value are required' });
-        }
-        const coupon = await Coupon.create({
-            code: code.toUpperCase(), type, value,
-            max_discount: max_discount || 0,
-            min_order_value: min_order_value || 0,
-            usage_limit: usage_limit || -1,
-            valid_until: valid_until || null,
-        });
-        res.json({ success: true, data: coupon });
-    } catch (err) { next(err); }
-});
-
-router.patch('/coupons/:id', async (req, res, next) => {
-    try {
-        const allowed = ['is_active', 'value', 'max_discount', 'min_order_value', 'usage_limit', 'valid_until'];
-        const updates = {};
-        allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
-
-        const coupon = await Coupon.findByIdAndUpdate(req.params.id, updates, { new: true });
-        if (!coupon) return res.status(404).json({ success: false, message: 'Coupon not found' });
-
-        res.json({ success: true, data: coupon });
-    } catch (err) { next(err); }
-});
-
-// ─── Brand Management ────────────────────────────────────────
-router.get('/brands', async (req, res, next) => {
-    try {
-        const brands = await Brand.find().populate('category_id', 'name').sort({ name: 1 });
-        // Attach plan counts
-        const brandIds = brands.map(b => b._id);
-        const planCounts = await Plan.aggregate([
-            { $match: { brand_id: { $in: brandIds } } },
-            { $group: { _id: '$brand_id', count: { $sum: 1 } } },
-        ]);
-        const countMap = {};
-        planCounts.forEach(p => { countMap[p._id.toString()] = p.count; });
-
-        const enriched = brands.map(b => ({
-            ...b.toObject(),
-            plan_count: countMap[b._id.toString()] || 0,
-        }));
-
-        res.json({ success: true, data: enriched });
-    } catch (err) { next(err); }
-});
-
-router.post('/brands', async (req, res, next) => {
-    try {
-        const { name, slug, category_id, logo_url, cover_url, description, tags, is_featured } = req.body;
-        if (!name || !slug || !category_id) {
-            return res.status(400).json({ success: false, message: 'name, slug, and category_id are required' });
-        }
-        const brand = await Brand.create({ name, slug, category_id, logo_url, cover_url, description, tags, is_featured });
-        res.json({ success: true, data: brand });
-    } catch (err) { next(err); }
-});
-
-router.patch('/brands/:id', async (req, res, next) => {
-    try {
-        const allowed = ['name', 'slug', 'logo_url', 'cover_url', 'description', 'tags', 'is_featured', 'is_active', 'category_id'];
-        const updates = {};
-        allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
-
-        const brand = await Brand.findByIdAndUpdate(req.params.id, updates, { new: true });
-        if (!brand) return res.status(404).json({ success: false, message: 'Brand not found' });
-
-        res.json({ success: true, data: brand });
-    } catch (err) { next(err); }
-});
-
-// ─── Withdrawal Management ───────────────────────────────────
-const WithdrawalRequest = require('../models/WithdrawalRequest');
-const EarningsAccount = require('../models/EarningsAccount');
-
+// ─── WITHDRAWALS ────────────────────────────────────────────
 router.get('/withdrawals', async (req, res, next) => {
-    try {
-        const filter = {};
-        if (req.query.status) filter.status = req.query.status;
-        if (req.query.source) filter.source = req.query.source;
-        const requests = await WithdrawalRequest.find(filter)
-            .populate('owner_id', 'name phone')
-            .sort({ createdAt: -1 });
-        res.json({ success: true, data: requests });
-    } catch (err) { next(err); }
+  try {
+    const withdrawals = await Withdrawal.find({ status: 'pending' }).populate('sellerId', 'name phone').sort({ requestedAt: -1 });
+    res.json({ success: true, data: withdrawals });
+  } catch (err) { next(err); }
 });
 
-router.post('/withdrawals/:id/approve', async (req, res, next) => {
-    try {
-        const wr = await WithdrawalRequest.findById(req.params.id);
-        if (!wr) return res.status(404).json({ success: false, message: 'Withdrawal request not found' });
-        if (wr.status !== 'requested') {
-            return res.status(400).json({ success: false, message: `Cannot approve — status is ${wr.status}` });
-        }
+router.put('/withdrawals/:id', async (req, res, next) => {
+  try {
+    const { status, transactionRef } = req.body;
+    const withdrawal = await Withdrawal.findById(req.params.id);
+    if (!withdrawal) return res.status(404).json({ success: false, message: 'Withdrawal not found' });
 
-        // Try Razorpay Payout if RazorpayX credentials exist
-        const rpxKeyId = process.env.RAZORPAYX_KEY_ID || process.env.RAZORPAY_KEY_ID;
-        const rpxKeySecret = process.env.RAZORPAYX_KEY_SECRET || process.env.RAZORPAY_KEY_SECRET;
-        const rpxAccountNo = process.env.RAZORPAYX_ACCOUNT_NUMBER;
+    withdrawal.status = status;
+    withdrawal.transactionRef = transactionRef;
+    withdrawal.adminId = req.user._id;
+    if (status === 'completed') withdrawal.processedAt = new Date();
+    
+    // If rejected, refund the wallet
+    if (status === 'failed') {
+      const seller = await User.findById(withdrawal.sellerId);
+      if (seller) {
+        seller.walletBalance += withdrawal.amount;
+        await seller.save();
+      }
+    }
 
-        if (rpxAccountNo && rpxKeyId && !rpxKeyId.includes('xxxxx')) {
-            // Real RazorpayX Payout
-            const Razorpay = require('razorpay');
-            const rpx = new Razorpay({ key_id: rpxKeyId, key_secret: rpxKeySecret });
+    await withdrawal.save();
+    res.json({ success: true, data: withdrawal });
+  } catch (err) { next(err); }
+});
 
-            wr.status = 'processing';
-            await wr.save();
+// ─── DISPUTES ───────────────────────────────────────────────
+router.get('/disputes', async (req, res, next) => {
+  try {
+    const disputes = await Dispute.find().populate('orderId').populate('raisedBy', 'name phone').sort({ createdAt: -1 });
+    res.json({ success: true, data: disputes });
+  } catch (err) { next(err); }
+});
 
-            try {
-                const fundAccount = wr.payout_method === 'upi'
-                    ? { account_type: 'vpa', vpa: { address: wr.payout_details.upi_id } }
-                    : { account_type: 'bank_account', bank_account: { name: wr.payout_details.account_holder, ifsc: wr.payout_details.ifsc_code, account_number: wr.payout_details.account_number } };
+router.put('/disputes/:id', async (req, res, next) => {
+  try {
+    const { status, resolution, adminNote, partialAmount } = req.body;
+    const dispute = await Dispute.findById(req.params.id);
+    if (!dispute) return res.status(404).json({ success: false, message: 'Dispute not found' });
 
-                const payout = await rpx.payouts?.create?.({
-                    account_number: rpxAccountNo,
-                    fund_account: fundAccount,
-                    amount: Math.round(wr.amount * 100),
-                    currency: 'INR',
-                    mode: wr.payout_method === 'upi' ? 'UPI' : 'NEFT',
-                    purpose: 'payout',
-                }) || {};
+    dispute.status = status || dispute.status;
+    dispute.adminNote = adminNote || dispute.adminNote;
+    dispute.adminId = req.user._id;
+    
+    if (resolution) {
+      dispute.resolution = resolution;
+      dispute.resolvedAt = new Date();
+      dispute.status = 'resolved';
 
-                wr.razorpay_payout_id = payout.id || `payout_${Date.now()}`;
-                wr.utr = payout.utr || '';
-                wr.status = payout.status === 'processed' ? 'paid' : 'processing';
-                await wr.save();
-            } catch (payoutErr) {
-                // Payout failed — refund balance and mark rejected
-                console.error('Payout API error:', payoutErr.message);
-                // Refund based on source
-                if (wr.source === 'wallet') {
-                    const WalletAccount = require('../models/WalletAccount');
-                    await WalletAccount.findOneAndUpdate(
-                        { user_id: wr.owner_id },
-                        { $inc: { balance: wr.amount } }
-                    );
-                } else {
-                    await EarningsAccount.findOneAndUpdate(
-                        { user_id: wr.owner_id },
-                        { $inc: { withdrawable_balance: wr.amount } }
-                    );
-                }
-                wr.status = 'rejected';
-                wr.reject_reason = `Payout API error: ${payoutErr.message}`;
-                await wr.save();
-                return res.status(500).json({ success: false, message: 'Payout failed', error: payoutErr.message });
+      const order = await Order.findById(dispute.orderId);
+      if (order && order.status === 'disputed') {
+        const EscrowTransaction = require('../models/EscrowTransaction');
+
+        if (resolution === 'refunded') {
+          // Full refund to buyer — seller keeps what was already released
+          order.status = 'refunded';
+          order.escrowPending = 0;
+
+          // Restore slot/quantity on the listing
+          const listing = await Listing.findById(order.listingId);
+          if (listing) {
+            if (order.type === 'subscription') {
+              listing.filledSlots = Math.max(0, listing.filledSlots - 1);
+            } else if (order.type === 'marketplace') {
+              listing.quantity += 1;
             }
-        } else {
-            // No RazorpayX — mark as paid (DEV mode)
-            wr.status = 'paid';
-            wr.razorpay_payout_id = `dev_payout_${Date.now()}`;
-            await wr.save();
+            await listing.save();
+          }
+
+          await EscrowTransaction.create({
+            orderId: order._id,
+            amountReleased: 0,
+            releaseDate: new Date(),
+            sellerWalletBefore: 0,
+            sellerWalletAfter: 0,
+            type: 'refund'
+          });
+
+        } else if (resolution === 'released') {
+          // Seller wins — release remaining escrow to seller
+          const seller = await User.findById(order.sellerId);
+          if (seller) {
+            const walletBefore = seller.walletBalance || 0;
+            seller.walletBalance = walletBefore + order.escrowPending;
+            await seller.save();
+
+            await EscrowTransaction.create({
+              orderId: order._id,
+              amountReleased: order.escrowPending,
+              releaseDate: new Date(),
+              sellerWalletBefore: walletBefore,
+              sellerWalletAfter: seller.walletBalance,
+              type: 'dispute_release'
+            });
+          }
+          order.escrowReleased += order.escrowPending;
+          order.escrowPending = 0;
+          order.status = 'completed';
+
+        } else if (resolution === 'partial' && partialAmount > 0) {
+          // Partial: release partialAmount to seller, refund the rest to buyer
+          const releaseToSeller = Math.min(partialAmount, order.escrowPending);
+          const refundToBuyer = order.escrowPending - releaseToSeller;
+
+          const seller = await User.findById(order.sellerId);
+          if (seller) {
+            const walletBefore = seller.walletBalance || 0;
+            seller.walletBalance = walletBefore + releaseToSeller;
+            await seller.save();
+
+            await EscrowTransaction.create({
+              orderId: order._id,
+              amountReleased: releaseToSeller,
+              releaseDate: new Date(),
+              sellerWalletBefore: walletBefore,
+              sellerWalletAfter: seller.walletBalance,
+              type: 'dispute_release'
+            });
+          }
+
+          order.escrowReleased += releaseToSeller;
+          order.escrowPending = 0;
+          order.status = 'completed';
+          // In real implementation: issue Razorpay refund for refundToBuyer amount
         }
 
-        res.json({ success: true, data: wr });
-    } catch (err) { next(err); }
-});
+        await order.save();
+      }
+    }
 
-router.post('/withdrawals/:id/reject', async (req, res, next) => {
-    try {
-        const wr = await WithdrawalRequest.findById(req.params.id);
-        if (!wr) return res.status(404).json({ success: false, message: 'Not found' });
-        if (!['requested', 'approved'].includes(wr.status)) {
-            return res.status(400).json({ success: false, message: `Cannot reject — status is ${wr.status}` });
-        }
-
-        // Refund the amount based on source
-        if (wr.source === 'wallet') {
-            const WalletAccount = require('../models/WalletAccount');
-            await WalletAccount.findOneAndUpdate(
-                { user_id: wr.owner_id },
-                { $inc: { balance: wr.amount } }
-            );
-        } else {
-            await EarningsAccount.findOneAndUpdate(
-                { user_id: wr.owner_id },
-                { $inc: { withdrawable_balance: wr.amount } }
-            );
-        }
-
-        wr.status = 'rejected';
-        wr.reject_reason = req.body.reject_reason || 'Rejected by admin';
-        await wr.save();
-
-        res.json({ success: true, data: wr });
-    } catch (err) { next(err); }
+    await dispute.save();
+    res.json({ success: true, data: dispute });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

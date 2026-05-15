@@ -1,102 +1,90 @@
 const router = require('express').Router();
-const mongoose = require('mongoose');
-const WithdrawalRequest = require('../models/WithdrawalRequest');
-const EarningsAccount = require('../models/EarningsAccount');
-const WalletAccount = require('../models/WalletAccount');
-const WalletTransaction = require('../models/WalletTransaction');
-const BRAND = require('../../../brand.config');
+const Withdrawal = require('../models/WithdrawalRequest');
+const User = require('../models/User');
 const { authenticate } = require('../middleware/auth');
 
-// ─── POST /withdrawals/request ───────────────────────────────
+// POST /api/v1/withdrawals/request
 router.post('/request', authenticate, async (req, res, next) => {
-    try {
-        const { amount, payout_method, payout_details, source = 'earnings' } = req.body;
-        const M = BRAND.money;
+  try {
+    const { amount, method, upiId, bankAccount, ifsc } = req.body;
 
-        // Validate source
-        if (!['wallet', 'earnings'].includes(source)) {
-            return res.status(400).json({ success: false, message: 'source must be wallet or earnings' });
-        }
-        if (source === 'wallet' && !M.walletWithdrawEnabled) {
-            return res.status(400).json({ success: false, message: 'Wallet withdrawals are not enabled' });
-        }
-        if (source === 'earnings' && !M.earningsWithdrawEnabled) {
-            return res.status(400).json({ success: false, message: 'Earnings withdrawals are not enabled' });
-        }
+    if (!amount || amount < 100) {
+      return res.status(400).json({ success: false, message: 'Minimum withdrawal is ₹100' });
+    }
 
-        // Min withdrawal from config
-        if (!amount || amount < M.minWithdrawal) {
-            return res.status(400).json({ success: false, message: `Minimum withdrawal is ${BRAND.currency.symbol}${M.minWithdrawal}` });
-        }
-        if (!['upi', 'bank'].includes(payout_method)) {
-            return res.status(400).json({ success: false, message: 'payout_method must be upi or bank' });
-        }
-        if (payout_method === 'upi' && !payout_details?.upi_id) {
-            return res.status(400).json({ success: false, message: 'UPI ID is required' });
-        }
-        if (payout_method === 'bank' && (!payout_details?.account_number || !payout_details?.ifsc_code)) {
-            return res.status(400).json({ success: false, message: 'Bank account number and IFSC are required' });
-        }
+    if (!['upi', 'bank'].includes(method)) {
+      return res.status(400).json({ success: false, message: 'Invalid method' });
+    }
 
-        // Check for existing pending requests for same source
-        const pendingCount = await WithdrawalRequest.countDocuments({
-            owner_id: req.user._id, source,
-            status: { $in: ['requested', 'approved', 'processing'] },
-        });
-        if (pendingCount > 0) {
-            return res.status(400).json({ success: false, message: 'You already have a pending withdrawal request for this source' });
-        }
+    if (method === 'upi' && !upiId) {
+      return res.status(400).json({ success: false, message: 'UPI ID is required' });
+    }
 
-        // Deduct balance atomically
-        if (source === 'earnings') {
-            const account = await EarningsAccount.findOneAndUpdate(
-                { user_id: req.user._id, withdrawable_balance: { $gte: amount } },
-                { $inc: { withdrawable_balance: -amount } },
-                { new: true }
-            );
-            if (!account) {
-                return res.status(400).json({ success: false, message: 'Insufficient withdrawable earnings balance' });
-            }
-        } else {
-            // source === 'wallet'
-            const wallet = await WalletAccount.findOneAndUpdate(
-                { user_id: req.user._id, balance: { $gte: amount } },
-                { $inc: { balance: -amount } },
-                { new: true }
-            );
-            if (!wallet) {
-                return res.status(400).json({ success: false, message: 'Insufficient wallet balance' });
-            }
-            // Record wallet transaction
-            await WalletTransaction.create({
-                wallet_id: wallet._id, type: 'debit', amount,
-                balance_after: wallet.balance, source: 'purchase',
-                description: `Withdrawal request of ${BRAND.currency.symbol}${amount}`,
-            });
-        }
+    if (method === 'bank' && (!bankAccount || !ifsc)) {
+      return res.status(400).json({ success: false, message: 'Bank account and IFSC required' });
+    }
 
-        const wr = await WithdrawalRequest.create({
-            owner_id: req.user._id,
-            source,
-            amount,
-            payout_method,
-            payout_details,
-        });
+    const user = await User.findById(req.user._id);
 
-        res.status(201).json({ success: true, data: wr });
-    } catch (err) { next(err); }
+    if (user.walletBalance < amount) {
+      return res.status(400).json({ success: false, message: 'Insufficient wallet balance' });
+    }
+
+    // Prevent duplicate pending withdrawals
+    const existingPending = await Withdrawal.findOne({ sellerId: user._id, status: 'pending' });
+    if (existingPending) {
+      return res.status(400).json({ success: false, message: 'You already have a pending withdrawal. Wait for it to be processed.' });
+    }
+
+    // Freeze balance (deduct)
+    user.walletBalance -= amount;
+    await user.save();
+
+    const withdrawal = await Withdrawal.create({
+      sellerId: user._id,
+      amount,
+      method,
+      upiId,
+      bankAccount,
+      ifsc,
+      status: 'pending'
+    });
+
+    res.status(201).json({ success: true, message: 'Withdrawal requested', data: withdrawal });
+  } catch (err) { next(err); }
 });
 
-// ─── GET /withdrawals/my ─────────────────────────────────────
+// GET /api/v1/withdrawals/my
 router.get('/my', authenticate, async (req, res, next) => {
-    try {
-        const filter = { owner_id: req.user._id };
-        if (req.query.source) filter.source = req.query.source;
-        if (req.query.status) filter.status = req.query.status;
-        const requests = await WithdrawalRequest.find(filter)
-            .sort({ createdAt: -1 });
-        res.json({ success: true, data: requests });
-    } catch (err) { next(err); }
+  try {
+    const requests = await Withdrawal.find({ sellerId: req.user._id })
+      .sort({ requestedAt: -1 });
+    res.json({ success: true, data: requests });
+  } catch (err) { next(err); }
+});
+
+// POST /api/v1/withdrawals/:id/pay (Admin only)
+router.post('/:id/pay', authenticate, async (req, res, next) => {
+  try {
+    if (!['admin', 'super_admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Admin only' });
+    }
+
+    const { transactionRef } = req.body;
+    const withdrawal = await Withdrawal.findById(req.params.id);
+
+    if (!withdrawal || withdrawal.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Invalid withdrawal or already processed' });
+    }
+
+    withdrawal.status = 'completed';
+    withdrawal.processedAt = new Date();
+    withdrawal.transactionRef = transactionRef;
+    withdrawal.adminId = req.user._id;
+    await withdrawal.save();
+
+    res.json({ success: true, message: 'Marked as paid', data: withdrawal });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

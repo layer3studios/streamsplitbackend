@@ -20,13 +20,15 @@ const server = http.createServer(app);
 const io = new SocketIO(server, {
   cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true },
 });
+// Make io accessible from route handlers via req.app.get('io')
+app.set('io', io);
 
 // ─── Global Middleware ────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
 app.use(compression());
 // Raw body for Razorpay webhook signature verification
-app.use('/api/v1/payments/razorpay/webhook', express.raw({ type: 'application/json' }));
+app.use('/api/v1/webhooks/razorpay', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -76,6 +78,7 @@ app.get('/api/v1/health', (req, res) => {
 // ─── API Routes ──────────────────────────────────────────────
 app.use('/api/v1/auth', require('./src/routes/auth.routes'));
 app.use('/api/v1/users', require('./src/routes/user.routes'));
+app.use('/api/v1/listings', require('./src/routes/listing.routes'));
 app.use('/api/v1/categories', require('./src/routes/category.routes'));
 app.use('/api/v1/brands', require('./src/routes/brand.routes'));
 app.use('/api/v1/plans', require('./src/routes/plan.routes'));
@@ -93,6 +96,7 @@ app.use('/api/v1/friends', require('./src/routes/friend.routes'));
 app.use('/api/v1/chat', require('./src/routes/chat.routes'));
 app.use('/api/v1/vault', require('./src/routes/vault.routes'));
 app.use('/api/v1/search', require('./src/routes/search.routes'));
+app.use('/api/v1/webhooks', require('./src/routes/webhook.routes'));
 
 // ─── DEV: Audit join by JoinIntent ID ────────────────────────
 app.get('/api/v1/dev/audit/join/:id', async (req, res) => {

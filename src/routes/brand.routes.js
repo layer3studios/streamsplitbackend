@@ -1,13 +1,37 @@
 const router = require('express').Router();
 const Brand = require('../models/Brand');
+const Category = require('../models/Category');
 const { authenticate, requireRole, optionalAuth } = require('../middleware/auth');
 
 router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const filter = { is_active: true };
-    if (req.query.category_id) filter.category_id = req.query.category_id;
+
+    // Support filtering by category slug (from frontend) OR category_id (direct ObjectId)
+    if (req.query.category) {
+      const cat = await Category.findOne({ slug: req.query.category, is_active: true });
+      if (cat) {
+        filter.category_id = cat._id;
+      } else {
+        // No matching category — return empty set
+        return res.json({ success: true, data: [] });
+      }
+    } else if (req.query.category_id) {
+      filter.category_id = req.query.category_id;
+    }
+
     if (req.query.featured === 'true') filter.is_featured = true;
-    if (req.query.search) filter.$text = { $search: req.query.search };
+
+    // Support both 'search' and 'q' query params
+    const searchTerm = req.query.search || req.query.q;
+    if (searchTerm) {
+      filter.$or = [
+        { name: { $regex: searchTerm, $options: 'i' } },
+        { tags: { $regex: searchTerm, $options: 'i' } },
+        { description: { $regex: searchTerm, $options: 'i' } },
+      ];
+    }
+
     const brands = await Brand.find(filter).populate('category_id', 'name slug').sort({ is_featured: -1, name: 1 });
     res.json({ success: true, data: brands });
   } catch (err) { next(err); }

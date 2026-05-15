@@ -13,6 +13,9 @@ const authenticate = async (req, res, next) => {
     if (!user || user.status !== 'active') {
       return res.status(401).json({ success: false, message: 'User not found or inactive' });
     }
+    if (user.isBanned) {
+      return res.status(403).json({ success: false, message: 'Your account has been suspended' });
+    }
     req.user = user;
     next();
   } catch (err) {

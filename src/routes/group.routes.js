@@ -253,6 +253,11 @@ router.post('/:id/announcements', authenticate, async (req, res, next) => {
     await ChatRoom.findByIdAndUpdate(room._id, { last_message_at: msg.createdAt, last_message_preview: `📢 ${text.trim().substring(0, 60)}` });
 
     const populated = await ChatMessage.findById(msg._id).populate('sender_id', 'name avatar_url phone');
+
+    // Broadcast to all users in the room via Socket.IO
+    const io = req.app.get('io');
+    if (io) io.to(`room:${room._id}`).emit('new_message', populated);
+
     res.status(201).json({ success: true, data: populated });
   } catch (err) { next(err); }
 });
@@ -281,6 +286,11 @@ router.post('/:id/vault', authenticate, async (req, res, next) => {
     await ChatRoom.findByIdAndUpdate(room._id, { last_message_at: msg.createdAt, last_message_preview: '🔐 Credentials updated' });
 
     const populated = await ChatMessage.findById(msg._id).populate('sender_id', 'name avatar_url phone');
+
+    // Broadcast vault update to all users in the room via Socket.IO
+    const io = req.app.get('io');
+    if (io) io.to(`room:${room._id}`).emit('new_message', populated);
+
     res.status(201).json({ success: true, data: { _id: populated._id, type: 'vault', content: populated.content, sender_id: populated.sender_id, createdAt: populated.createdAt } });
   } catch (err) { next(err); }
 });
@@ -382,6 +392,11 @@ router.post('/:id/logged-out', authenticate, async (req, res, next) => {
     });
 
     await ChatRoom.findByIdAndUpdate(room._id, { last_message_at: msg.createdAt, last_message_preview: msg.content.substring(0, 80) });
+
+    // Broadcast logged-out help request to all users in the room via Socket.IO
+    const populatedMsg = await ChatMessage.findById(msg._id).populate('sender_id', 'name avatar_url phone');
+    const io = req.app.get('io');
+    if (io) io.to(`room:${room._id}`).emit('new_message', populatedMsg);
 
     res.json({ success: true, message: 'Help request sent to group chat' });
   } catch (err) { next(err); }
